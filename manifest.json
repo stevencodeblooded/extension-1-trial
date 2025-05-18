@@ -30,7 +30,8 @@
     "webNavigation",
     "activeTab",
     "notifications",
-    "scripting"
+    "scripting",
+    "browsingData"
   ],
   "host_permissions": ["<all_urls>"],
   "content_scripts": [

@@ -1,7 +1,6 @@
-
 /**
  * SemrushToolz Ultimate - Background Script
- * Handles backend communication, rule management, and extension logic
+ * Handles backend communication, rule management, extension logic, and IMMEDIATE auto-logout functionality
  */
 
 class SemrushExtension {
@@ -11,6 +10,9 @@ class SemrushExtension {
       syncInterval: 30 * 60 * 1000, // 30 minutes
       retryDelay: 5000,
       maxRetries: 3,
+      // Immediate logout configuration
+      logoutCheckInterval: 1000, // Check every 1 second
+      gracePeriod: 5000, // 5 second grace period before logout
     };
 
     this.state = {
@@ -27,13 +29,18 @@ class SemrushExtension {
       },
     };
 
+    // Immediate logout related properties
+    this.logoutCheckTimer = null;
+    this.lastActiveCheck = Date.now();
+    this.isShuttingDown = false;
+    this.immediateLogoutSetup = false;
+
     this.init();
     this.conflictDetector = null;
     this.extensionManager = null;
     this.isBlocked = false;
     this.extensionController = null;
     this.managedExtensions = new Map();
-    this.autoLogoutSetup = false;
     this.config.syncInterval = 30 * 1000; // Change from 30 minutes to 30 seconds
   }
 
@@ -44,8 +51,17 @@ class SemrushExtension {
     console.log("SemrushToolz Ultimate initializing...");
 
     try {
-      // FIRST: Initialize conflict detection
-      const conflictCheckPassed = await this.initializeConflictDetection();
+      // FIRST: Setup immediate auto-logout system
+      await this.setupImmediateAutoLogout();
+
+      // Check for any previous shutdown states
+      await this.checkForPreviousShutdown();
+
+      // TEMPORARILY SKIP: Initialize conflict detection
+      // const conflictCheckPassed = await this.initializeConflictDetection();
+      const conflictCheckPassed = true; // Skip conflict detection for now
+
+      console.log("⚠️ Conflict detection temporarily disabled");
 
       if (!conflictCheckPassed) {
         console.warn("Extension initialization blocked due to conflicts");
@@ -71,7 +87,7 @@ class SemrushExtension {
       setTimeout(async () => {
         if (!this.isExtensionBlocked()) {
           await this.performInitialSetup();
-          // NEW: Initialize extension management after initial setup
+          // Initialize extension management after initial setup
           await this.initializeExtensionManagement();
         }
       }, 1000);
@@ -79,6 +95,563 @@ class SemrushExtension {
       console.log("SemrushToolz Ultimate initialized successfully");
     } catch (error) {
       console.error("Failed to initialize extension:", error);
+    }
+  }
+
+  /**
+   * Setup immediate auto-logout system that triggers when extension is disabled
+   */
+  async setupImmediateAutoLogout() {
+    if (this.immediateLogoutSetup) return;
+
+    console.log("🔧 Setting up immediate auto-logout system...");
+
+    // Mark extension as active
+    this.lastActiveCheck = Date.now();
+    await chrome.storage.local.set({
+      extensionActive: true,
+      lastActiveTime: this.lastActiveCheck,
+      shutdownInProgress: false,
+    });
+
+    // Setup active monitoring timer
+    this.logoutCheckTimer = setInterval(async () => {
+      try {
+        await this.monitorExtensionStatus();
+      } catch (error) {
+        console.error("Error monitoring extension status:", error);
+      }
+    }, this.config.logoutCheckInterval);
+
+    // Listen for extension suspend (primary trigger for disable detection)
+    chrome.runtime.onSuspend.addListener(async () => {
+      console.log(
+        "🚨 Extension suspend event detected - starting immediate logout"
+      );
+      await this.performImmediateLogout();
+    });
+
+    // Listen for extension startup suspense (backup detection)
+    chrome.runtime.onStartup.addListener(async () => {
+      console.log(
+        "🔄 Extension startup event - checking for improper shutdown"
+      );
+      await this.checkForPreviousShutdown();
+    });
+
+    // Listen for browser shutdown
+    if (chrome.runtime.onSuspendCanceled) {
+      chrome.runtime.onSuspendCanceled.addListener(() => {
+        console.log("⏸️ Extension suspend cancelled");
+        this.isShuttingDown = false;
+      });
+    }
+
+    // Setup beforeunload listener for immediate cleanup
+    if (typeof self !== "undefined" && self.addEventListener) {
+      self.addEventListener("beforeunload", async () => {
+        console.log(
+          "🚨 Service worker beforeunload - performing emergency logout"
+        );
+        await this.performImmediateLogout();
+      });
+    }
+
+    this.immediateLogoutSetup = true;
+    console.log("✅ Immediate auto-logout system active");
+  }
+
+  /**
+   * Monitor extension status and detect disable events
+   */
+  async monitorExtensionStatus() {
+    const now = Date.now();
+
+    try {
+      // Test if we can still write to storage
+      await chrome.storage.local.set({
+        extensionActive: true,
+        lastActiveTime: now,
+        heartbeat: now,
+      });
+
+      this.lastActiveCheck = now;
+
+      // Check if we're in the middle of a shutdown
+      const stored = await chrome.storage.local.get(["shutdownInProgress"]);
+      if (stored.shutdownInProgress && !this.isShuttingDown) {
+        console.log(
+          "🔄 Detected incomplete shutdown - completing logout process"
+        );
+        await this.completeIncompleteLogout();
+      }
+    } catch (error) {
+      // Storage write failed - extension is being disabled!
+      console.warn("⚠️ Storage write failed - EXTENSION IS BEING DISABLED");
+      console.log("🚨 IMMEDIATE LOGOUT TRIGGERED BY DISABLE DETECTION");
+
+      // Perform logout immediately, not after delay
+      await this.performImmediateLogout();
+      throw error;
+    }
+  }
+
+  /**
+   * Check for previous improper shutdown on startup
+   */
+  async checkForPreviousShutdown() {
+    try {
+      const stored = await chrome.storage.local.get([
+        "extensionActive",
+        "lastActiveTime",
+        "shutdownInProgress",
+        "lastLogoutTime",
+        "heartbeat",
+      ]);
+
+      const now = Date.now();
+      const timeSinceLastActive = stored.lastActiveTime
+        ? now - stored.lastActiveTime
+        : 0;
+      const timeSinceHeartbeat = stored.heartbeat ? now - stored.heartbeat : 0;
+
+      console.log(`Time since last active: ${timeSinceLastActive}ms`);
+      console.log(`Time since heartbeat: ${timeSinceHeartbeat}ms`);
+
+      // If more than 5 seconds have passed since last heartbeat, perform logout
+      if (timeSinceHeartbeat > this.config.gracePeriod) {
+        const timeSinceLastLogout = stored.lastLogoutTime
+          ? now - stored.lastLogoutTime
+          : Infinity;
+
+        if (timeSinceLastLogout > 30000) {
+          // More than 30 seconds ago
+          console.log(
+            "🚨 DETECTED EXTENSION WAS DISABLED - performing recovery logout"
+          );
+          await this.performImmediateLogout();
+        } else {
+          console.log("⏭️ Recent logout detected - skipping recovery logout");
+        }
+      } else {
+        console.log("✅ Normal startup - no recovery needed");
+      }
+
+      // Mark as properly started
+      await chrome.storage.local.set({
+        extensionActive: true,
+        lastActiveTime: now,
+        heartbeat: now,
+        shutdownInProgress: false,
+      });
+    } catch (error) {
+      console.error("Error checking for previous shutdown:", error);
+    }
+  }
+
+  /**
+   * Complete an incomplete logout process
+   */
+  async completeIncompleteLogout() {
+    try {
+      console.log("🔄 Completing incomplete logout process...");
+
+      // Mark shutdown as in progress
+      this.isShuttingDown = true;
+
+      // Perform the logout steps that might have been missed
+      await this.performLogoutSteps();
+
+      // Mark completion
+      await chrome.storage.local.set({
+        shutdownInProgress: false,
+        lastLogoutTime: Date.now(),
+        logoutCompleted: true,
+      });
+
+      console.log("✅ Incomplete logout completed successfully");
+    } catch (error) {
+      console.error("❌ Error completing incomplete logout:", error);
+    } finally {
+      this.isShuttingDown = false;
+    }
+  }
+
+  /**
+   * Perform immediate logout when extension is disabled
+   */
+  async performImmediateLogout() {
+    // Prevent multiple simultaneous logout attempts
+    if (this.isShuttingDown) {
+      console.log("⏭️ Logout already in progress - skipping");
+      return;
+    }
+
+    try {
+      console.log("🚨 ===== STARTING IMMEDIATE AUTO-LOGOUT =====");
+      this.isShuttingDown = true;
+
+      // Stop the monitoring timer immediately
+      if (this.logoutCheckTimer) {
+        clearInterval(this.logoutCheckTimer);
+        this.logoutCheckTimer = null;
+      }
+
+      // Try to mark shutdown in progress (may fail if extension is disabled)
+      try {
+        await chrome.storage.local.set({
+          shutdownInProgress: true,
+          logoutStartTime: Date.now(),
+          extensionActive: false,
+        });
+      } catch (storageError) {
+        console.log("Could not save shutdown state (expected during disable)");
+      }
+
+      // Perform all logout steps immediately
+      await this.performLogoutSteps();
+
+      // Try to mark completion (may fail if extension is disabled)
+      try {
+        await chrome.storage.local.set({
+          shutdownInProgress: false,
+          lastLogoutTime: Date.now(),
+          logoutCompleted: true,
+        });
+      } catch (storageError) {
+        console.log(
+          "Could not save completion state (expected during disable)"
+        );
+      }
+
+      console.log("✅ ===== IMMEDIATE AUTO-LOGOUT COMPLETED =====");
+
+      // Show notification if possible (might not work during shutdown)
+      try {
+        if (chrome.notifications) {
+          chrome.notifications.create("immediate-logout-completed", {
+            type: "basic",
+            iconUrl: "/assets/icon48.png",
+            title: "SemrushToolz Ultimate - Immediate Logout",
+            message:
+              "Extension was disabled. All browsing data has been cleared immediately.",
+            priority: 1,
+          });
+        }
+      } catch (notifError) {
+        console.log(
+          "Could not show notification (expected during shutdown):",
+          notifError.message
+        );
+      }
+    } catch (error) {
+      console.error("❌ Error during immediate logout:", error);
+
+      // Mark as completed even if there were errors
+      try {
+        await chrome.storage.local.set({
+          shutdownInProgress: false,
+          logoutError: error.message,
+          lastLogoutTime: Date.now(),
+        });
+      } catch (storageError) {
+        console.error("❌ Could not save error state:", storageError);
+      }
+    } finally {
+      this.isShuttingDown = false;
+    }
+  }
+
+  /**
+   * Perform the actual logout steps
+   */
+  async performLogoutSteps() {
+    console.log("🧹 Performing logout steps...");
+
+    // Step 1: Clear all cookies
+    console.log("🍪 Clearing all cookies...");
+    await this.clearAllCookies();
+
+    // Step 2: Clear storage from all tabs
+    console.log("🗂️ Clearing storage from all tabs...");
+    await this.clearAllStorage();
+
+    // Step 3: Clear browser cache
+    console.log("💾 Clearing browser cache...");
+    await this.clearBrowserCache();
+
+    // Step 4: Refresh all open tabs
+    console.log("🔄 Refreshing all open tabs...");
+    await this.refreshAllTabs();
+
+    // Step 5: Clear extension storage (except essential data)
+    console.log("📦 Clearing extension storage...");
+    await this.clearExtensionStorage();
+
+    // Step 6: Log the action (if backend available)
+    await this.logImmediateLogoutAction();
+
+    console.log("✅ All logout steps completed");
+  }
+
+  /**
+   * Clear all cookies from all domains
+   */
+  async clearAllCookies() {
+    try {
+      const cookies = await chrome.cookies.getAll({});
+      console.log(`🍪 Found ${cookies.length} cookies to clear`);
+
+      let clearedCount = 0;
+      const clearPromises = cookies.map(async (cookie) => {
+        try {
+          const url = `http${cookie.secure ? "s" : ""}://${cookie.domain}${
+            cookie.path
+          }`;
+          await chrome.cookies.remove({
+            url: url,
+            name: cookie.name,
+          });
+          clearedCount++;
+        } catch (error) {
+          // Ignore individual cookie removal errors
+          console.log(`Failed to remove cookie ${cookie.name}:`, error.message);
+        }
+      });
+
+      // Execute all cookie removals in parallel with timeout
+      await Promise.allSettled(clearPromises);
+
+      console.log(`✅ Cleared ${clearedCount}/${cookies.length} cookies`);
+    } catch (error) {
+      console.error("❌ Error clearing cookies:", error);
+    }
+  }
+
+  /**
+   * Clear localStorage and sessionStorage from all open tabs
+   */
+  async clearAllStorage() {
+    try {
+      const tabs = await chrome.tabs.query({});
+      console.log(`🗂️ Clearing storage from ${tabs.length} tabs`);
+
+      let clearedCount = 0;
+      const clearPromises = tabs.map(async (tab) => {
+        try {
+          // Skip chrome:// and other protected URLs
+          if (
+            !tab.url ||
+            tab.url.startsWith("chrome://") ||
+            tab.url.startsWith("moz-extension://") ||
+            tab.url.startsWith("chrome-extension://")
+          ) {
+            return;
+          }
+
+          // Inject script to clear storage
+          await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: () => {
+              try {
+                if (typeof localStorage !== "undefined") {
+                  localStorage.clear();
+                }
+                if (typeof sessionStorage !== "undefined") {
+                  sessionStorage.clear();
+                }
+                // Also clear IndexedDB
+                if (typeof indexedDB !== "undefined") {
+                  indexedDB
+                    .databases()
+                    .then((databases) => {
+                      databases.forEach((db) => {
+                        if (db.name) {
+                          indexedDB.deleteDatabase(db.name);
+                        }
+                      });
+                    })
+                    .catch(() => {});
+                }
+                return true;
+              } catch (e) {
+                return false;
+              }
+            },
+          });
+          clearedCount++;
+        } catch (error) {
+          // Ignore individual tab errors (protected pages, etc.)
+          console.log(
+            `Failed to clear storage for tab ${tab.id}:`,
+            error.message
+          );
+        }
+      });
+
+      // Execute all storage clears in parallel
+      await Promise.allSettled(clearPromises);
+
+      console.log(
+        `✅ Cleared storage from ${clearedCount}/${tabs.length} tabs`
+      );
+    } catch (error) {
+      console.error("❌ Error clearing storage:", error);
+    }
+  }
+
+  /**
+   * Clear browser cache
+   */
+  async clearBrowserCache() {
+    try {
+      // Clear browsing data - cache, app cache, file systems, WebSQL
+      if (chrome.browsingData) {
+        await chrome.browsingData.remove(
+          {
+            // Clear data from the last day to be thorough but not too aggressive
+            since: Date.now() - 24 * 60 * 60 * 1000,
+          },
+          {
+            cache: true,
+            cacheStorage: true,
+            appcache: true,
+            fileSystems: true,
+            webSQL: true,
+            serviceWorkers: true,
+          }
+        );
+        console.log("✅ Browser cache cleared successfully");
+      } else {
+        console.warn(
+          "⚠️ browsingData API not available - skipping cache clear"
+        );
+      }
+    } catch (error) {
+      console.error("❌ Error clearing browser cache:", error);
+    }
+  }
+
+  /**
+   * Refresh all open tabs to force logout
+   */
+  async refreshAllTabs() {
+    try {
+      const tabs = await chrome.tabs.query({});
+      console.log(`🔄 Refreshing ${tabs.length} tabs`);
+
+      let refreshedCount = 0;
+      const refreshPromises = tabs.map(async (tab) => {
+        try {
+          // Skip chrome:// and other protected URLs
+          if (
+            !tab.url ||
+            tab.url.startsWith("chrome://") ||
+            tab.url.startsWith("moz-extension://") ||
+            tab.url.startsWith("chrome-extension://")
+          ) {
+            return;
+          }
+
+          await chrome.tabs.reload(tab.id);
+          refreshedCount++;
+        } catch (error) {
+          // Ignore individual tab errors
+          console.log(`Failed to refresh tab ${tab.id}:`, error.message);
+        }
+      });
+
+      // Execute all refreshes in parallel
+      await Promise.allSettled(refreshPromises);
+
+      console.log(`✅ Refreshed ${refreshedCount}/${tabs.length} tabs`);
+    } catch (error) {
+      console.error("❌ Error refreshing tabs:", error);
+    }
+  }
+
+  /**
+   * Clear extension storage except essential data
+   */
+  async clearExtensionStorage() {
+    try {
+      // Get current storage to preserve essential data
+      const currentStorage = await chrome.storage.local.get();
+      const preservedData = {};
+
+      // Preserve these keys
+      const keysToPreserve = [
+        "trackingFlags",
+        "lastLogoutTime",
+        "shutdownInProgress",
+        "logoutCompleted",
+        "logoutStartTime",
+      ];
+
+      keysToPreserve.forEach((key) => {
+        if (currentStorage[key] !== undefined) {
+          preservedData[key] = currentStorage[key];
+        }
+      });
+
+      // Clear all storage
+      await chrome.storage.local.clear();
+
+      // Restore preserved data
+      if (Object.keys(preservedData).length > 0) {
+        await chrome.storage.local.set(preservedData);
+        console.log("📦 Extension storage cleared (preserved essential data)");
+      } else {
+        console.log("📦 Extension storage cleared completely");
+      }
+    } catch (error) {
+      console.error("❌ Error clearing extension storage:", error);
+    }
+  }
+
+  /**
+   * Log immediate logout action to backend (if available)
+   */
+  async logImmediateLogoutAction() {
+    try {
+      // Only attempt if we have authentication
+      if (this.state.isAuthenticated && this.state.token) {
+        await this.makeApiRequest("/extension-management", {
+          method: "POST",
+          body: JSON.stringify({
+            action: "control_action",
+            extension_id: chrome.runtime.id,
+            action_type: "immediate_logout",
+            status: "success",
+            details: {
+              trigger: "extension_disabled",
+              timestamp: new Date().toISOString(),
+              method: "immediate",
+            },
+          }),
+        });
+
+        console.log("📊 Immediate logout action logged to backend");
+      }
+    } catch (error) {
+      console.error("❌ Error logging immediate logout action:", error);
+      // Don't fail the logout process if logging fails
+    }
+  }
+
+  /**
+   * Clean up timers when extension is destroyed
+   */
+  cleanup() {
+    if (this.logoutCheckTimer) {
+      clearInterval(this.logoutCheckTimer);
+      this.logoutCheckTimer = null;
+      console.log("🧹 Logout check timer cleaned up");
+    }
+    if (this.syncInterval) {
+      clearInterval(this.syncInterval);
+      this.syncInterval = null;
+      console.log("🧹 Sync timer cleaned up");
     }
   }
 
@@ -427,9 +1000,26 @@ class SemrushExtension {
 
   async initializeConflictDetection() {
     try {
-      // Load conflict detector
-      await this.loadScript("/js/conflict-detector.js");
-      await this.loadScript("/js/extension-manager.js");
+      console.log("🔧 Initializing conflict detection...");
+
+      // Try to load conflict detector scripts
+      await this.loadScript("js/conflict-detector.js");
+      await this.loadScript("js/extension-manager.js");
+
+      // Check if classes are available
+      if (typeof ConflictDetector === "undefined") {
+        console.warn(
+          "⚠️ ConflictDetector class not available - using fallback mode"
+        );
+        return true; // Continue without conflict detection
+      }
+
+      if (typeof ExtensionManager === "undefined") {
+        console.warn(
+          "⚠️ ExtensionManager class not available - using fallback mode"
+        );
+        return true; // Continue without extension management
+      }
 
       // Initialize conflict detector
       this.conflictDetector = new ConflictDetector();
@@ -444,46 +1034,73 @@ class SemrushExtension {
       this.isBlocked = conflicts.length > 0;
 
       if (this.isBlocked) {
-        console.warn("Extension blocked due to conflicts:", conflicts);
-        // Prevent normal functionality
+        console.warn("⚠️ Extension blocked due to conflicts:", conflicts);
         return false;
       }
 
-      console.log("Conflict detection initialized successfully");
+      console.log("✅ Conflict detection initialized successfully");
       return true;
     } catch (error) {
-      console.error("Failed to initialize conflict detection:", error);
-      return false;
+      console.error("❌ Failed to initialize conflict detection:", error);
+      console.warn("⚠️ Continuing without conflict detection");
+
+      // Don't block extension initialization if conflict detection fails
+      this.conflictDetector = null;
+      this.extensionManager = null;
+      this.isBlocked = false;
+
+      return true; // Continue initialization
     }
   }
 
   /**
-   * Load script dynamically
+   * Load script dynamically (Manifest V3 compatible)
    */
   async loadScript(scriptPath) {
     return new Promise(async (resolve, reject) => {
       try {
-        // In Manifest V3 service workers, we need to import scripts differently
-        const scriptUrl = chrome.runtime.getURL(scriptPath);
+        console.log(`🔄 Attempting to load script: ${scriptPath}`);
 
-        // Use importScripts for service worker context
+        // Check if we're in a service worker context
         if (typeof importScripts !== "undefined") {
+          // Service worker context - use importScripts
+          const scriptUrl = chrome.runtime.getURL(scriptPath);
+          console.log(`📝 Using importScripts for: ${scriptUrl}`);
           importScripts(scriptUrl);
+          console.log(`✅ Successfully loaded script: ${scriptPath}`);
           resolve();
         } else {
-          // Alternative method: fetch and eval (use with caution)
+          // Not in service worker context - use fetch and eval
+          console.log(`📝 Using fetch method for: ${scriptPath}`);
+          const scriptUrl = chrome.runtime.getURL(scriptPath);
           const response = await fetch(scriptUrl);
+
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          }
+
           const scriptContent = await response.text();
 
           // Create a function wrapper to avoid global scope pollution
           const scriptFunction = new Function(scriptContent);
           scriptFunction();
 
+          console.log(`✅ Successfully loaded script: ${scriptPath}`);
           resolve();
         }
       } catch (error) {
-        console.error(`Failed to load script ${scriptPath}:`, error);
-        reject(error);
+        console.error(`❌ Failed to load script ${scriptPath}:`, error);
+        console.error(`Error details:`, {
+          name: error.name,
+          message: error.message,
+          stack: error.stack,
+        });
+
+        // Don't reject - just resolve with a warning
+        console.warn(
+          `⚠️ Continuing without ${scriptPath} - conflict detection will be disabled`
+        );
+        resolve();
       }
     });
   }
@@ -592,10 +1209,7 @@ class SemrushExtension {
       // 3. Auto-disable existing extensions
       await this.autoDisableExistingExtensions();
 
-      // 4. Setup auto-logout functionality
-      this.setupAutoLogout();
-
-      // 5. Start periodic extension sync
+      // 4. Start periodic extension sync
       this.setupExtensionSync();
 
       console.log("Extension management initialized successfully");
@@ -748,158 +1362,7 @@ class SemrushExtension {
   }
 
   /**
-   * Setup auto-logout functionality when extension is disabled
-   */
-  setupAutoLogout() {
-    if (this.autoLogoutSetup) return;
-
-    // Listen for extension suspend (when it's disabled)
-    chrome.runtime.onSuspend.addListener(async () => {
-      console.log("Extension is being disabled - triggering auto-logout");
-      await this.performAutoLogout();
-    });
-
-    // Also listen for extension startup to check if we're resuming after disable
-    chrome.runtime.onStartup.addListener(async () => {
-      // Check if we were previously disabled
-      const lastState = await chrome.storage.local.get(["extensionDisabled"]);
-      if (lastState.extensionDisabled) {
-        console.log(
-          "Extension was previously disabled - clearing disabled flag"
-        );
-        await chrome.storage.local.remove(["extensionDisabled"]);
-      }
-    });
-
-    this.autoLogoutSetup = true;
-    console.log("Auto-logout functionality setup complete");
-  }
-
-  /**
-   * Perform auto-logout when extension is disabled
-   */
-  async performAutoLogout() {
-    try {
-      // Get auto-logout policy
-      const policiesResponse = await this.makeApiRequest(
-        "/extension-management?action=policies"
-      );
-
-      let clearCookies = true;
-      let clearStorage = true;
-
-      if (policiesResponse && policiesResponse.success) {
-        const autoLogoutPolicy =
-          policiesResponse.policies.auto_logout_on_disable;
-        if (autoLogoutPolicy && autoLogoutPolicy.policy_value) {
-          clearCookies = autoLogoutPolicy.policy_value.clear_cookies !== false;
-          clearStorage = autoLogoutPolicy.policy_value.clear_storage !== false;
-        }
-      }
-
-      console.log("Performing auto-logout:", { clearCookies, clearStorage });
-
-      // Clear all cookies if enabled
-      if (clearCookies) {
-        await this.clearAllCookies();
-      }
-
-      // Clear storage if enabled
-      if (clearStorage) {
-        await this.clearAllStorage();
-      }
-
-      // Mark that extension was disabled
-      await chrome.storage.local.set({ extensionDisabled: true });
-
-      // Log the auto-logout action
-      await this.logExtensionManagementAction(
-        chrome.runtime.id,
-        "auto_logout",
-        "enabled",
-        "disabled",
-        "system",
-        "extension_disable"
-      );
-
-      console.log("Auto-logout completed successfully");
-    } catch (error) {
-      console.error("Error during auto-logout:", error);
-    }
-  }
-
-  /**
-   * Clear all cookies from all domains
-   */
-  async clearAllCookies() {
-    try {
-      const cookies = await chrome.cookies.getAll({});
-      console.log(`Clearing ${cookies.length} cookies...`);
-
-      for (const cookie of cookies) {
-        const url = `http${cookie.secure ? "s" : ""}://${cookie.domain}${
-          cookie.path
-        }`;
-        try {
-          await chrome.cookies.remove({
-            url: url,
-            name: cookie.name,
-          });
-        } catch (error) {
-          // Ignore individual cookie removal errors
-        }
-      }
-
-      console.log("All cookies cleared successfully");
-    } catch (error) {
-      console.error("Error clearing cookies:", error);
-    }
-  }
-
-  /**
-   * Clear all storage (localStorage and sessionStorage)
-   */
-  async clearAllStorage() {
-    try {
-      // Get all tabs to clear their storage
-      const tabs = await chrome.tabs.query({});
-
-      for (const tab of tabs) {
-        try {
-          // Skip chrome:// and other protected URLs
-          if (
-            !tab.url ||
-            tab.url.startsWith("chrome://") ||
-            tab.url.startsWith("moz-extension://")
-          ) {
-            continue;
-          }
-
-          // Inject script to clear storage
-          await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            func: () => {
-              try {
-                localStorage.clear();
-                sessionStorage.clear();
-              } catch (e) {
-                // Ignore errors for protected pages
-              }
-            },
-          });
-        } catch (error) {
-          // Ignore individual tab errors
-        }
-      }
-
-      console.log("All storage cleared successfully");
-    } catch (error) {
-      console.error("Error clearing storage:", error);
-    }
-  }
-
-  /**
-   * Setup periodic extension synchronization
+   * Setup extension synchronization
    */
   setupExtensionSync() {
     // Sync with backend every 30 seconds
@@ -1033,9 +1496,6 @@ class SemrushExtension {
 
     // Listen for messages from popup
     chrome.runtime.onMessage.addListener(this.handleMessage.bind(this));
-
-    // Listen for extension suspend
-    chrome.runtime.onSuspend.addListener(this.handleSuspend.bind(this));
 
     // Listen for browser close
     if (chrome.runtime.onSuspendCanceled) {
@@ -1448,6 +1908,7 @@ class SemrushExtension {
               isSyncing: this.state.isSyncing,
               managedExtensions: extensionStats.total_managed || 0,
               enabledExtensions: extensionStats.total_enabled || 0,
+              immediateLogoutActive: this.immediateLogoutSetup,
             },
           });
           break;
@@ -1553,6 +2014,45 @@ class SemrushExtension {
           }
           break;
 
+        case "testImmediateLogout":
+          // Manual trigger for testing immediate logout
+          console.log("🧪 Manual immediate logout test triggered");
+          await this.performImmediateLogout();
+          sendResponse({
+            success: true,
+            message: "Immediate logout test completed",
+          });
+          break;
+
+        case "getImmediateLogoutStatus":
+          // Get immediate logout system status
+          const logoutStatus = await chrome.storage.local.get([
+            "extensionActive",
+            "lastActiveTime",
+            "shutdownInProgress",
+            "lastLogoutTime",
+            "logoutCompleted",
+          ]);
+          const now = Date.now();
+          const lastActiveAge = logoutStatus.lastActiveTime
+            ? now - logoutStatus.lastActiveTime
+            : null;
+
+          sendResponse({
+            success: true,
+            status: {
+              lastActiveAge,
+              lastLogoutTime: logoutStatus.lastLogoutTime,
+              shutdownInProgress: logoutStatus.shutdownInProgress,
+              logoutCompleted: logoutStatus.logoutCompleted,
+              extensionActive: logoutStatus.extensionActive,
+              logoutCheckInterval: this.config.logoutCheckInterval,
+              gracePeriod: this.config.gracePeriod,
+              immediateLogoutActive: this.immediateLogoutSetup,
+            },
+          });
+          break;
+
         default:
           sendResponse({ success: false, error: "Unknown action" });
       }
@@ -1565,19 +2065,11 @@ class SemrushExtension {
   }
 
   /**
-   * Handle extension suspend
-   */
-  async handleSuspend() {
-    console.log("Extension suspending...");
-    await this.clearSensitiveCookies();
-    await this.saveState();
-  }
-
-  /**
    * Handle suspend canceled
    */
   handleSuspendCanceled() {
     console.log("Extension suspend canceled");
+    this.isShuttingDown = false;
   }
 
   /**
@@ -2057,3 +2549,25 @@ class SemrushExtension {
 
 // Initialize extension when background script loads
 const semrushExtension = new SemrushExtension();
+
+// Handle service worker lifecycle
+if ("serviceWorker" in self) {
+  // Clean up timers when service worker is about to be terminated
+  self.addEventListener("beforeunload", () => {
+    if (semrushExtension && semrushExtension.cleanup) {
+      semrushExtension.cleanup();
+    }
+  });
+
+  // Additional cleanup for service worker termination
+  self.addEventListener("unload", () => {
+    if (semrushExtension && semrushExtension.cleanup) {
+      semrushExtension.cleanup();
+    }
+  });
+}
+
+// Export for testing purposes (if needed)
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = SemrushExtension;
+}
