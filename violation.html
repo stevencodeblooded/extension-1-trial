@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SemrushToolz Ultimate - Privacy Policy Violation</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #ff6b6b, #ee5a24);
+            color: white;
+            margin: 0;
+            padding: 20px;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .violation-container {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 30px;
+            text-align: center;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            max-width: 500px;
+            width: 100%;
+        }
+        
+        .violation-icon {
+            font-size: 64px;
+            margin-bottom: 20px;
+            display: block;
+        }
+        
+        .violation-title {
+            font-size: 24px;
+            font-weight: bold;
+            margin-bottom: 15px;
+            color: #fff;
+        }
+        
+        .violation-message {
+            font-size: 16px;
+            line-height: 1.6;
+            margin-bottom: 25px;
+            opacity: 0.9;
+        }
+        
+        .violation-steps {
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+            text-align: left;
+        }
+        
+        .violation-steps h3 {
+            margin-top: 0;
+            color: #ffd700;
+            font-size: 18px;
+        }
+        
+        .violation-steps ol {
+            margin: 0;
+            padding-left: 20px;
+        }
+        
+        .violation-steps li {
+            margin-bottom: 10px;
+            font-size: 14px;
+        }
+        
+        .close-button {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 25px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+        }
+        
+        .close-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
+        }
+        
+        .warning-text {
+            font-size: 12px;
+            opacity: 0.8;
+            margin-top: 15px;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <div class="violation-container">
+        <span class="violation-icon">🚫</span>
+        <h1 class="violation-title">Privacy Policy Violation Detected</h1>
+        
+        <p class="violation-message">
+            You have installed browser extensions that conflict with SemrushToolz Ultimate's privacy policy and functionality.
+        </p>
+        
+        <div class="violation-steps">
+            <h3>⚠️ Required Actions:</h3>
+            <ol>
+                <li>Remove all conflicting extensions from Chrome</li>
+                <li>Restart your browser completely</li>
+                <li>Reinstall SemrushToolz Ultimate</li>
+                <li>Do not install conflicting extensions again</li>
+            </ol>
+        </div>
+        
+        <p class="violation-message">
+            <strong>Your extension has been temporarily disabled</strong> for security and privacy reasons. Normal functionality will resume only after conflicting extensions are removed.
+        </p>
+        
+        <button class="close-button" onclick="window.close()">
+            Close Window
+        </button>
+        
+        <p class="warning-text">
+            This action is necessary to maintain the integrity and security of SemrushToolz Ultimate.
+        </p>
+    </div>
+
+    <script>
+        // Get URL parameters to determine blocking reason
+        const urlParams = new URLSearchParams(window.location.search);
+        const reason = urlParams.get('reason');
+        
+        // Customize message based on reason
+        if (reason === 'extensions_page_blocked') {
+            document.querySelector('.violation-title').textContent = 'Extension Management Blocked';
+            document.querySelector('.violation-message').textContent = 'Access to Chrome\'s extension management page is restricted by SemrushToolz Ultimate.';
+            
+            // Update steps
+            const stepsList = document.querySelector('.violation-steps ol');
+            if (stepsList) {
+                stepsList.innerHTML = `
+                    <li>Extension management is centrally controlled</li>
+                    <li>Contact your administrator for extension changes</li>
+                    <li>Use SemrushToolz Ultimate settings instead</li>
+                    <li>This restriction ensures system security</li>
+                `;
+            }
+        }
+        
+        // Auto-close after 30 seconds if user doesn't interact
+        setTimeout(() => {
+            window.close();
+        }, 30000);
+    
+        // Log the violation view
+        if (chrome && chrome.runtime) {
+            chrome.runtime.sendMessage({
+                action: 'violationPageViewed',
+                reason: reason || 'unknown',
+                timestamp: new Date().toISOString()
+            }).catch(() => {
+                // Ignore errors
+            });
+        }
+    </script>
+</body>
+</html>

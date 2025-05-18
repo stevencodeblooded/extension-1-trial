@@ -1,0 +1,52 @@
+{
+  "manifest_version": 3,
+  "name": "SemrushToolz Ultimate",
+  "version": "3.0.0",
+  "description": "Advanced tool for managing website access and enhancing browsing experience with backend integration",
+  "author": "SemrushToolz",
+  "icons": {
+    "16": "assets/icon16.png",
+    "48": "assets/icon48.png",
+    "128": "assets/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "assets/icon16.png",
+      "48": "assets/icon48.png",
+      "128": "assets/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "storage",
+    "tabs",
+    "cookies",
+    "management",
+    "declarativeNetRequest",
+    "webRequest",
+    "webNavigation",
+    "activeTab",
+    "notifications"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["lib/jquery.min.js", "js/content-script.js"],
+      "run_at": "document_end",
+      "all_frames": false
+    }
+  ],
+  "declarative_net_request": {
+    "rule_resources": []
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["assets/*", "violation.html"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

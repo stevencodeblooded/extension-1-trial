@@ -1,0 +1,16 @@
+semrush-extension/
+├── manifest.json
+├── background.js
+├── popup.html
+├── popup.js
+├── assets/
+│   ├── icon16.png
+│   ├── icon48.png
+│   ├── icon128.png
+│   └── logo.png
+├── css/
+│   └── popup.css
+├── js/
+│   └── content-script.js
+└── lib/
+    └── jquery.min.js

@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SemrushToolz Ultimate</title>
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/popup.css">
+</head>
+<body>
+  <div class="container">
+    <!-- Header Section -->
+    <header class="header">
+      <div class="brand">
+        <img src="assets/logo.png" alt="SemrushToolz Ultimate" class="logo">
+        <h1 class="title">SemrushToolz Ultimate</h1>
+      </div>
+      <div class="status-indicator" id="statusIndicator">
+        <div class="pulse"></div>
+      </div>
+    </header>
+
+    <!-- Status Section -->
+    <section class="status-section">
+      <div class="status-item">
+        <span class="label">Status:</span>
+        <span class="value" id="statusValue">Checking...</span>
+      </div>
+      <div class="status-item">
+        <span class="label">Last Sync:</span>
+        <span class="value" id="lastSyncValue">Never</span>
+      </div>
+      <div class="status-item">
+        <span class="label">Active Rules:</span>
+        <span class="value" id="rulesCountValue">0</span>
+      </div>
+    </section>
+
+    <!-- Actions Section -->
+    <section class="actions-section">
+      <button id="syncButton" class="action-button primary">
+        <span class="button-text">Sync Rules</span>
+        <div class="loader hidden">
+          <div class="spinner"></div>
+        </div>
+      </button>
+      
+      <button id="settingsButton" class="action-button secondary">
+        <span class="button-text">Settings</span>
+      </button>
+    </section>
+
+    <!-- Info Section -->
+    <section class="info-section">
+      <div class="info-item">
+        <div class="info-content">
+          <h3>Extension Status</h3>
+          <p id="statusMessage">Ready to protect your browsing experience</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <div class="footer-content">
+        <span class="copyright">&copy; 2024 SemrushToolz</span>
+        <span class="version">v3.0.0</span>
+      </div>
+    </footer>
+  </div>
+
+  <!-- Scripts -->
+  <script src="popup.js"></script>
+</body>
+</html>
