@@ -29,7 +29,8 @@
     "webRequest",
     "webNavigation",
     "activeTab",
-    "notifications"
+    "notifications",
+    "scripting"
   ],
   "host_permissions": ["<all_urls>"],
   "content_scripts": [
@@ -45,7 +46,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["assets/*", "violation.html"],
+      "resources": ["assets/*", "violation.html", "js/*"],
       "matches": ["<all_urls>"]
     }
   ]

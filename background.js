@@ -31,6 +31,10 @@ class SemrushExtension {
     this.conflictDetector = null;
     this.extensionManager = null;
     this.isBlocked = false;
+    this.extensionController = null;
+    this.managedExtensions = new Map();
+    this.autoLogoutSetup = false;
+    this.config.syncInterval = 30 * 1000; // Change from 30 minutes to 30 seconds
   }
 
   /**
@@ -67,6 +71,8 @@ class SemrushExtension {
       setTimeout(async () => {
         if (!this.isExtensionBlocked()) {
           await this.performInitialSetup();
+          // NEW: Initialize extension management after initial setup
+          await this.initializeExtensionManagement();
         }
       }, 1000);
 
@@ -183,69 +189,80 @@ class SemrushExtension {
    */
   async shouldBlockExtensionsPage() {
     try {
-      // 1. Check if extension has conflicts (highest priority)
+      // Check if extension has conflicts (highest priority)
       if (this.conflictDetector) {
         const conflicts = await this.conflictDetector.checkForConflicts();
         if (conflicts.length > 0) {
           return {
             block: true,
             type: "conflict",
-            reason: `Conflicting extensions detected: ${conflicts
-              .map((c) => c.name)
-              .join(", ")}`,
-            message: `Extension management blocked due to conflicting extensions: ${conflicts
-              .map((c) => c.name)
-              .join(", ")}`,
+            reason: `Conflicting extensions detected`,
+            message: `Extension management blocked due to conflicts.`,
           };
         }
       }
 
-      // 2. Check if extension is in development/testing mode (allow access)
+      // Check if extension is in development mode
       if (this.isDevelopmentMode()) {
-        console.log(
-          "Development mode detected - allowing extensions page access"
+        console.log("Development mode detected - checking policy...");
+
+        // Get blocking policy
+        const policiesResponse = await this.makeApiRequest(
+          "/extension-management?action=policies"
         );
-        return false;
+
+        if (policiesResponse && policiesResponse.success) {
+          const blockPolicy =
+            policiesResponse.policies.block_extensions_page_access;
+
+          if (blockPolicy && blockPolicy.policy_value) {
+            // If allow_dev_mode is true, allow access in dev mode
+            if (blockPolicy.policy_value.allow_dev_mode) {
+              console.log("Development mode allowed by policy");
+              return false;
+            }
+          }
+        }
       }
 
-      // 3. Check authentication status and backend policy
-      const blockingPolicy = await this.getExtensionBlockingPolicy();
+      // Get backend blocking policy
+      const policiesResponse = await this.makeApiRequest(
+        "/extension-management?action=policies"
+      );
 
-      if (blockingPolicy.blockAlways) {
-        return {
-          block: true,
-          type: "policy",
-          reason: "Admin policy requires extension management control",
-          message: "Extension management is controlled by your administrator.",
-        };
+      if (policiesResponse && policiesResponse.success) {
+        const blockPolicy =
+          policiesResponse.policies.block_extensions_page_access;
+
+        if (
+          blockPolicy &&
+          blockPolicy.policy_value &&
+          blockPolicy.policy_value.enabled
+        ) {
+          return {
+            block: true,
+            type: "policy",
+            reason: "Backend policy blocks extensions page access",
+            message:
+              "Extension management is controlled by your administrator.",
+          };
+        }
       }
 
-      // 4. Check if extension is authenticated and in normal operation
+      // Check authentication status
       if (!this.state.isAuthenticated) {
         return {
           block: true,
           type: "auth",
           reason: "Extension not authenticated",
-          message:
-            "Extension management requires authentication. Please sync your extension first.",
+          message: "Extension management requires authentication.",
         };
       }
 
-      // 5. Check for specific time-based restrictions (optional)
-      if (this.isTimeRestricted()) {
-        return {
-          block: true,
-          type: "time",
-          reason: "Extension management restricted during this time",
-          message: "Extension management is restricted during business hours.",
-        };
-      }
-
-      // 6. Default: Allow access if no blocking conditions are met
+      // Default: Allow access
       return false;
     } catch (error) {
-      console.error("Error checking blocking conditions:", error);
-      // In case of error, default to allowing access to prevent lockout
+      console.error("Error checking blocking policy:", error);
       return false;
     }
   }
@@ -384,17 +401,21 @@ class SemrushExtension {
         return;
       }
 
-      await this.makeApiRequest("/extension-conflicts", {
+      await this.makeApiRequest("/extension-management", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          action: "extension_page_access_blocked",
-          extensionId: chrome.runtime.id,
-          blockedUrl: blockedUrl,
-          reason: reason,
-          timestamp: new Date().toISOString(),
+          action: "control_action",
+          extension_id: chrome.runtime.id,
+          action_type: "extensions_page_blocked",
+          status: "success",
+          details: {
+            blocked_url: blockedUrl,
+            reason: reason,
+            timestamp: new Date().toISOString(),
+          },
         }),
       });
 
@@ -558,6 +579,398 @@ class SemrushExtension {
   }
 
   /**
+   * Initialize extension management features
+   */
+  async initializeExtensionManagement() {
+    try {
+      // 1. Initialize extension controller
+      await this.initializeExtensionController();
+
+      // 2. Discover and register all existing extensions
+      await this.discoverAndRegisterExtensions();
+
+      // 3. Auto-disable existing extensions
+      await this.autoDisableExistingExtensions();
+
+      // 4. Setup auto-logout functionality
+      this.setupAutoLogout();
+
+      // 5. Start periodic extension sync
+      this.setupExtensionSync();
+
+      console.log("Extension management initialized successfully");
+    } catch (error) {
+      console.error("Failed to initialize extension management:", error);
+    }
+  }
+
+  /**
+   * Initialize the extension controller for auto-disable functionality
+   */
+  async initializeExtensionController() {
+    try {
+      // For now, we'll handle extension management directly in this class
+      console.log("Extension controller initialized successfully");
+      return true;
+    } catch (error) {
+      console.error("Failed to initialize extension controller:", error);
+      return false;
+    }
+  }
+
+  /**
+   * Discover all installed extensions and register them with backend
+   */
+  async discoverAndRegisterExtensions() {
+    try {
+      const extensions = await chrome.management.getAll();
+      const extensionsToRegister = [];
+
+      for (const extension of extensions) {
+        // Skip our own extension, Chrome apps, and themes
+        if (
+          extension.id === chrome.runtime.id ||
+          extension.type !== "extension" ||
+          extension.type === "theme"
+        ) {
+          continue;
+        }
+
+        extensionsToRegister.push({
+          extension_id: extension.id,
+          extension_name: extension.name,
+          version: extension.version,
+          description: extension.description || "",
+          install_type: extension.installType,
+          is_enabled: extension.enabled,
+          discovery_method: "initial_scan",
+        });
+      }
+
+      if (extensionsToRegister.length > 0) {
+        // Register extensions with backend
+        const response = await this.makeApiRequest("/extension-management", {
+          method: "POST",
+          body: JSON.stringify({
+            action: "register",
+            extensions: extensionsToRegister,
+          }),
+        });
+
+        if (response && response.success) {
+          console.log(
+            `Registered ${response.registered}/${response.total} extensions with backend`
+          );
+        }
+      }
+
+      console.log(`Discovered ${extensionsToRegister.length} extensions`);
+    } catch (error) {
+      console.error("Error discovering and registering extensions:", error);
+    }
+  }
+
+  /**
+   * Auto-disable all existing extensions except our own
+   */
+  async autoDisableExistingExtensions() {
+    try {
+      // Get auto-disable policy
+      const policiesResponse = await this.makeApiRequest(
+        "/extension-management?action=policies"
+      );
+
+      if (!policiesResponse || !policiesResponse.success) {
+        console.log("Could not fetch extension policies");
+        return;
+      }
+
+      const autoDisablePolicy =
+        policiesResponse.policies.auto_disable_new_extensions;
+      if (!autoDisablePolicy || !autoDisablePolicy.policy_value.enabled) {
+        console.log("Auto-disable policy is disabled");
+        return;
+      }
+
+      const excludedTypes = autoDisablePolicy.policy_value.excluded_types || [
+        "theme",
+      ];
+      const extensions = await chrome.management.getAll();
+      let disabledCount = 0;
+
+      for (const extension of extensions) {
+        try {
+          // Skip our own extension, disabled extensions, and excluded types
+          if (
+            extension.id === chrome.runtime.id ||
+            !extension.enabled ||
+            excludedTypes.includes(extension.type)
+          ) {
+            continue;
+          }
+
+          // Disable the extension
+          await chrome.management.setEnabled(extension.id, false);
+          disabledCount++;
+
+          // Log the action
+          await this.logExtensionManagementAction(
+            extension.id,
+            "auto_disable",
+            "enabled",
+            "disabled",
+            "system",
+            "initial_setup"
+          );
+
+          console.log(`Auto-disabled extension: ${extension.name}`);
+        } catch (error) {
+          console.error(
+            `Failed to disable extension ${extension.name}:`,
+            error
+          );
+        }
+      }
+
+      console.log(`Auto-disabled ${disabledCount} extensions`);
+
+      // Show notification if any extensions were disabled
+      if (disabledCount > 0) {
+        this.showExtensionNotification(
+          "Extensions Auto-Disabled",
+          `${disabledCount} extensions have been disabled and are now managed by SemrushToolz Ultimate.`,
+          "info"
+        );
+      }
+    } catch (error) {
+      console.error("Error auto-disabling existing extensions:", error);
+    }
+  }
+
+  /**
+   * Setup auto-logout functionality when extension is disabled
+   */
+  setupAutoLogout() {
+    if (this.autoLogoutSetup) return;
+
+    // Listen for extension suspend (when it's disabled)
+    chrome.runtime.onSuspend.addListener(async () => {
+      console.log("Extension is being disabled - triggering auto-logout");
+      await this.performAutoLogout();
+    });
+
+    // Also listen for extension startup to check if we're resuming after disable
+    chrome.runtime.onStartup.addListener(async () => {
+      // Check if we were previously disabled
+      const lastState = await chrome.storage.local.get(["extensionDisabled"]);
+      if (lastState.extensionDisabled) {
+        console.log(
+          "Extension was previously disabled - clearing disabled flag"
+        );
+        await chrome.storage.local.remove(["extensionDisabled"]);
+      }
+    });
+
+    this.autoLogoutSetup = true;
+    console.log("Auto-logout functionality setup complete");
+  }
+
+  /**
+   * Perform auto-logout when extension is disabled
+   */
+  async performAutoLogout() {
+    try {
+      // Get auto-logout policy
+      const policiesResponse = await this.makeApiRequest(
+        "/extension-management?action=policies"
+      );
+
+      let clearCookies = true;
+      let clearStorage = true;
+
+      if (policiesResponse && policiesResponse.success) {
+        const autoLogoutPolicy =
+          policiesResponse.policies.auto_logout_on_disable;
+        if (autoLogoutPolicy && autoLogoutPolicy.policy_value) {
+          clearCookies = autoLogoutPolicy.policy_value.clear_cookies !== false;
+          clearStorage = autoLogoutPolicy.policy_value.clear_storage !== false;
+        }
+      }
+
+      console.log("Performing auto-logout:", { clearCookies, clearStorage });
+
+      // Clear all cookies if enabled
+      if (clearCookies) {
+        await this.clearAllCookies();
+      }
+
+      // Clear storage if enabled
+      if (clearStorage) {
+        await this.clearAllStorage();
+      }
+
+      // Mark that extension was disabled
+      await chrome.storage.local.set({ extensionDisabled: true });
+
+      // Log the auto-logout action
+      await this.logExtensionManagementAction(
+        chrome.runtime.id,
+        "auto_logout",
+        "enabled",
+        "disabled",
+        "system",
+        "extension_disable"
+      );
+
+      console.log("Auto-logout completed successfully");
+    } catch (error) {
+      console.error("Error during auto-logout:", error);
+    }
+  }
+
+  /**
+   * Clear all cookies from all domains
+   */
+  async clearAllCookies() {
+    try {
+      const cookies = await chrome.cookies.getAll({});
+      console.log(`Clearing ${cookies.length} cookies...`);
+
+      for (const cookie of cookies) {
+        const url = `http${cookie.secure ? "s" : ""}://${cookie.domain}${
+          cookie.path
+        }`;
+        try {
+          await chrome.cookies.remove({
+            url: url,
+            name: cookie.name,
+          });
+        } catch (error) {
+          // Ignore individual cookie removal errors
+        }
+      }
+
+      console.log("All cookies cleared successfully");
+    } catch (error) {
+      console.error("Error clearing cookies:", error);
+    }
+  }
+
+  /**
+   * Clear all storage (localStorage and sessionStorage)
+   */
+  async clearAllStorage() {
+    try {
+      // Get all tabs to clear their storage
+      const tabs = await chrome.tabs.query({});
+
+      for (const tab of tabs) {
+        try {
+          // Skip chrome:// and other protected URLs
+          if (
+            !tab.url ||
+            tab.url.startsWith("chrome://") ||
+            tab.url.startsWith("moz-extension://")
+          ) {
+            continue;
+          }
+
+          // Inject script to clear storage
+          await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: () => {
+              try {
+                localStorage.clear();
+                sessionStorage.clear();
+              } catch (e) {
+                // Ignore errors for protected pages
+              }
+            },
+          });
+        } catch (error) {
+          // Ignore individual tab errors
+        }
+      }
+
+      console.log("All storage cleared successfully");
+    } catch (error) {
+      console.error("Error clearing storage:", error);
+    }
+  }
+
+  /**
+   * Setup periodic extension synchronization
+   */
+  setupExtensionSync() {
+    // Sync with backend every 30 seconds
+    setInterval(async () => {
+      if (this.state.isAuthenticated && !this.state.isSyncing) {
+        await this.syncExtensionStates();
+      }
+    }, 30000);
+
+    console.log("Extension sync scheduled every 30 seconds");
+  }
+
+  /**
+   * Sync extension states with backend
+   */
+  async syncExtensionStates() {
+    try {
+      // Get managed extensions from backend
+      const response = await this.makeApiRequest(
+        "/extension-management?action=list"
+      );
+
+      if (!response || !response.success) {
+        console.log("Could not fetch managed extensions from backend");
+        return;
+      }
+
+      const managedExtensions = response.extensions;
+
+      // Check each managed extension
+      for (const managedExt of managedExtensions) {
+        try {
+          // Get current state from Chrome
+          const chromeExt = await chrome.management.get(
+            managedExt.extension_id
+          );
+
+          // If states differ, update Chrome to match backend
+          if (chromeExt.enabled !== managedExt.is_enabled) {
+            await chrome.management.setEnabled(
+              managedExt.extension_id,
+              managedExt.is_enabled
+            );
+
+            console.log(
+              `Synced ${managedExt.extension_name}: ${chromeExt.enabled} -> ${managedExt.is_enabled}`
+            );
+
+            // Log the sync action
+            await this.logExtensionManagementAction(
+              managedExt.extension_id,
+              "sync_correction",
+              chromeExt.enabled ? "enabled" : "disabled",
+              managedExt.is_enabled ? "enabled" : "disabled",
+              "system",
+              "periodic_sync"
+            );
+          }
+        } catch (error) {
+          // Extension might be uninstalled
+          console.log(
+            `Extension ${managedExt.extension_name} not found locally - may be uninstalled`
+          );
+        }
+      }
+    } catch (error) {
+      console.error("Error syncing extension states:", error);
+    }
+  }
+
+  /**
    * Validate existing token
    */
   async validateToken() {
@@ -629,6 +1042,326 @@ class SemrushExtension {
       chrome.runtime.onSuspendCanceled.addListener(
         this.handleSuspendCanceled.bind(this)
       );
+    }
+
+    // Listen for extension installations
+    if (chrome.management && chrome.management.onInstalled) {
+      chrome.management.onInstalled.addListener(async (info) => {
+        console.log("New extension installed:", info.name);
+        await this.handleNewExtensionInstalled(info);
+      });
+    }
+
+    // Listen for extension uninstalls
+    if (chrome.management && chrome.management.onUninstalled) {
+      chrome.management.onUninstalled.addListener(async (extensionId) => {
+        console.log("Extension uninstalled:", extensionId);
+        await this.handleExtensionUninstalled(extensionId);
+      });
+    }
+
+    // Listen for extension enable/disable attempts
+    if (chrome.management && chrome.management.onEnabled) {
+      chrome.management.onEnabled.addListener(async (info) => {
+        console.log("Extension enabled:", info.name);
+        await this.handleExtensionEnabled(info);
+      });
+    }
+
+    if (chrome.management && chrome.management.onDisabled) {
+      chrome.management.onDisabled.addListener(async (info) => {
+        console.log("Extension disabled:", info.name);
+        await this.handleExtensionDisabled(info);
+      });
+    }
+  }
+
+  /**
+   * Handle new extension installation
+   */
+  async handleNewExtensionInstalled(extensionInfo) {
+    try {
+      // Skip our own extension and themes
+      if (
+        extensionInfo.id === chrome.runtime.id ||
+        extensionInfo.type === "theme"
+      ) {
+        return;
+      }
+
+      // Register with backend
+      const extensionData = {
+        extension_id: extensionInfo.id,
+        extension_name: extensionInfo.name,
+        version: extensionInfo.version,
+        description: extensionInfo.description || "",
+        install_type: extensionInfo.installType,
+        is_enabled: extensionInfo.enabled,
+        discovery_method: "new_install",
+      };
+
+      await this.makeApiRequest("/extension-management", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "register",
+          extensions: [extensionData],
+        }),
+      });
+
+      // Check if should be auto-disabled
+      const policiesResponse = await this.makeApiRequest(
+        "/extension-management?action=policies"
+      );
+
+      if (policiesResponse && policiesResponse.success) {
+        const autoDisablePolicy =
+          policiesResponse.policies.auto_disable_new_extensions;
+
+        if (autoDisablePolicy && autoDisablePolicy.policy_value.enabled) {
+          const excludedTypes = autoDisablePolicy.policy_value
+            .excluded_types || ["theme"];
+
+          if (
+            !excludedTypes.includes(extensionInfo.type) &&
+            extensionInfo.enabled
+          ) {
+            // Auto-disable the extension
+            await chrome.management.setEnabled(extensionInfo.id, false);
+
+            // Log the action
+            await this.logExtensionManagementAction(
+              extensionInfo.id,
+              "auto_disable",
+              "enabled",
+              "disabled",
+              "system",
+              "new_install"
+            );
+
+            // Show notification
+            this.showExtensionNotification(
+              "Extension Auto-Disabled",
+              `${extensionInfo.name} has been automatically disabled and is now managed by SemrushToolz Ultimate.`,
+              "info"
+            );
+
+            console.log(
+              `Auto-disabled newly installed extension: ${extensionInfo.name}`
+            );
+          }
+        }
+      }
+    } catch (error) {
+      console.error("Error handling new extension installation:", error);
+    }
+  }
+
+  /**
+   * Handle extension uninstall
+   */
+  async handleExtensionUninstalled(extensionId) {
+    try {
+      // Log uninstall
+      await this.logExtensionManagementAction(
+        extensionId,
+        "uninstall",
+        null,
+        null,
+        "user",
+        "manual"
+      );
+    } catch (error) {
+      console.error("Error handling extension uninstall:", error);
+    }
+  }
+
+  /**
+   * Handle extension enabled
+   */
+  async handleExtensionEnabled(extensionInfo) {
+    try {
+      // Skip our own extension
+      if (extensionInfo.id === chrome.runtime.id) {
+        return;
+      }
+
+      // Check if this extension should be backend controlled
+      const response = await this.makeApiRequest(
+        `/extension-management?action=get&extension_id=${extensionInfo.id}`
+      );
+
+      if (response && response.success && response.extension) {
+        const managedExt = response.extension;
+
+        // If backend controlled and should be disabled, re-disable it
+        if (managedExt.backend_controlled && !managedExt.is_enabled) {
+          console.log(
+            `Extension ${extensionInfo.name} manually enabled but should be disabled - re-disabling`
+          );
+
+          // Wait a moment then disable it again
+          setTimeout(async () => {
+            try {
+              await chrome.management.setEnabled(extensionInfo.id, false);
+
+              // Log the correction
+              await this.logExtensionManagementAction(
+                extensionInfo.id,
+                "manual_enable_blocked",
+                "enabled",
+                "disabled",
+                "system",
+                "policy_enforcement"
+              );
+
+              // Show notification
+              this.showExtensionNotification(
+                "Extension Control Violation",
+                `${extensionInfo.name} is managed by SemrushToolz Ultimate and cannot be manually enabled.`,
+                "warning"
+              );
+            } catch (error) {
+              console.error(
+                `Failed to re-disable extension ${extensionInfo.name}:`,
+                error
+              );
+            }
+          }, 1000);
+        } else {
+          // Update backend state
+          await this.makeApiRequest("/extension-management", {
+            method: "PUT",
+            body: JSON.stringify({
+              action: "toggle_status",
+              extension_id: extensionInfo.id,
+              is_enabled: true,
+              triggered_by: "user",
+            }),
+          });
+        }
+      }
+    } catch (error) {
+      console.error("Error handling extension enabled:", error);
+    }
+  }
+
+  /**
+   * Handle extension disabled
+   */
+  async handleExtensionDisabled(extensionInfo) {
+    try {
+      // Skip our own extension
+      if (extensionInfo.id === chrome.runtime.id) {
+        return;
+      }
+
+      // Update backend state
+      await this.makeApiRequest("/extension-management", {
+        method: "PUT",
+        body: JSON.stringify({
+          action: "toggle_status",
+          extension_id: extensionInfo.id,
+          is_enabled: false,
+          triggered_by: "user",
+        }),
+      });
+
+      // Log the action
+      await this.logExtensionManagementAction(
+        extensionInfo.id,
+        "manual_disable",
+        "enabled",
+        "disabled",
+        "user",
+        "manual"
+      );
+    } catch (error) {
+      console.error("Error handling extension disabled:", error);
+    }
+  }
+
+  /**
+   * Log extension management action to backend
+   */
+  async logExtensionManagementAction(
+    extensionId,
+    action,
+    oldState,
+    newState,
+    triggeredBy,
+    source
+  ) {
+    try {
+      await this.makeApiRequest("/extension-management", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "control_action",
+          extension_id: extensionId,
+          action_type: action,
+          status: "success",
+          details: {
+            old_state: oldState,
+            new_state: newState,
+            triggered_by: triggeredBy,
+            source: source,
+            timestamp: new Date().toISOString(),
+          },
+        }),
+      });
+    } catch (error) {
+      console.error("Error logging extension management action:", error);
+    }
+  }
+
+  /**
+   * Show extension notification
+   */
+  showExtensionNotification(title, message, type = "info") {
+    if (chrome.notifications) {
+      const iconMap = {
+        info: "/assets/icon48.png",
+        warning: "/assets/icon48.png",
+        error: "/assets/icon48.png",
+        success: "/assets/icon48.png",
+      };
+
+      chrome.notifications.create({
+        type: "basic",
+        iconUrl: iconMap[type],
+        title: title,
+        message: message,
+        priority: type === "error" ? 2 : 1,
+      });
+    }
+  }
+
+  /**
+   * Get extension management statistics
+   */
+  async getExtensionManagementStats() {
+    try {
+      const response = await this.makeApiRequest(
+        "/extension-management?action=stats"
+      );
+
+      if (response && response.success) {
+        return response.stats;
+      }
+
+      return {
+        total_managed: 0,
+        total_enabled: 0,
+        total_disabled: 0,
+        recent_actions_24h: 0,
+      };
+    } catch (error) {
+      console.error("Error getting extension management stats:", error);
+      return {
+        total_managed: 0,
+        total_enabled: 0,
+        total_disabled: 0,
+        recent_actions_24h: 0,
+      };
     }
   }
 
@@ -704,6 +1437,7 @@ class SemrushExtension {
     try {
       switch (message.action) {
         case "getStatus":
+          const extensionStats = await this.getExtensionManagementStats();
           sendResponse({
             success: true,
             data: {
@@ -712,6 +1446,8 @@ class SemrushExtension {
               rulesCount: this.getTotalRulesCount(),
               isAuthenticating: this.state.isAuthenticating,
               isSyncing: this.state.isSyncing,
+              managedExtensions: extensionStats.total_managed || 0,
+              enabledExtensions: extensionStats.total_enabled || 0,
             },
           });
           break;
@@ -795,6 +1531,26 @@ class SemrushExtension {
             message.blockReason
           );
           sendResponse({ success: true });
+          break;
+
+        case "getExtensionStats":
+          const stats = await this.getExtensionManagementStats();
+          sendResponse({
+            success: true,
+            stats: stats,
+          });
+          break;
+
+        case "syncExtensions":
+          if (this.state.isAuthenticated && !this.state.isSyncing) {
+            await this.syncExtensionStates();
+            sendResponse({ success: true });
+          } else {
+            sendResponse({
+              success: false,
+              error: "Not authenticated or sync in progress",
+            });
+          }
           break;
 
         default:
@@ -1182,7 +1938,11 @@ class SemrushExtension {
     useToken = true,
     shouldRetry = true
   ) {
-    const url = `${this.config.apiUrl}${endpoint}.php`;
+    const url = endpoint.includes("?")
+      ? `${this.config.apiUrl}${endpoint.split("?")[0]}.php?${
+          endpoint.split("?")[1]
+        }`
+      : `${this.config.apiUrl}${endpoint}.php`;
 
     console.log(`=== API REQUEST: ${endpoint} ===`);
     console.log("URL:", url);
